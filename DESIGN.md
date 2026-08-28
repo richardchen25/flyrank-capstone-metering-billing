@@ -94,6 +94,8 @@ The webhook endpoint returns 200 on a replayed event rather than an error, becau
 
 The key comes from the client as an `Idempotency-Key` header on `POST /generate`. Its scope is per tenant, so two different tenants sending the same key are two different events and neither blocks the other.
 
+The header is mandatory. A `POST /generate` without one is rejected with **400**; I do not generate a key server-side and I do not process the request unkeyed. Both fallbacks defeat the point: a server-generated key is unique per attempt, so a retry gets a fresh key and bills twice, which is exactly the failure this section exists to prevent. Making it required pushes that decision onto the client, which is the only party that knows whether a given call is a retry.
+
 On a duplicate, I return the original response rather than processing again or erroring. From the client's side a retry looks like the request succeeding, which is the behavior a retrying client expects.
 
 I do not store the response body. I reconstruct it from the existing `usage_events` row, which works because every field in a `/generate` response is derived from that row: the event id, the four token counts, `cost_micros`, and the remaining quota computed from the tenant's usage for the period. Storing a `response_body` column would be the alternative, and it would be the right call if responses ever contained something not recoverable from the event. They do not, so a stored copy would be a second source of truth I would have to keep in sync with the first.
