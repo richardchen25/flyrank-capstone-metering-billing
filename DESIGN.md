@@ -48,6 +48,10 @@ Concretely: 2,500 output tokens at $0.40 per million is 2500 x 0.40 / 1,000,000 
 
 Floats are out for the standard reason: binary floating point cannot represent most decimal fractions exactly, so summing many small costs accumulates error, and money that does not add up exactly is a bug I would have to explain to a customer.
 
+**Rounding.** Costs do not always land on a whole micro: one input token at $0.10 per million is 0.1 micros. I round to nearest rather than always down or always up. Flooring undercharges on every fractional event and the shortfall is all mine; ceiling overcharges on every fractional event and the excess is all the tenant's. Both are biases pointing one direction, so they compound across millions of events instead of cancelling. Rounding to nearest averages out. Ties break upward, so an exact half-micro goes to me, which at a millionth of a dollar is not worth a fairer tie-break. I also round once on the event total rather than once per token category — that holds the error for a whole event under half a micro instead of up to two.
+
+**What per-event rounding gives away.** Rounding happens at the end of each event and nothing carries over, so usage under half a micro is free. A tenant making 1,000 calls that each price at 0.4 micros is billed 0, not 400. I am accepting that. The alternative is carrying a fractional balance per tenant across events, which means another column, another value to keep consistent under concurrent writes, and a rounding story spread across time rather than contained in one row. The revenue at stake is a fraction of a cent per event; the complexity is not worth it at this scale. It is also not a way to get free capacity: the quota in section 8 is counted in calls and tokens, not micros, so those 1,000 calls still count against the limit even when they cost nothing.
+
 ## 5. Token pricing rules
 
 Four categories, four rates, pinned as constants:
