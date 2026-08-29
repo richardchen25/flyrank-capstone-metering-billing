@@ -160,6 +160,76 @@ DESIGN.md section 8. 429 rather than 402 because the subscription is active and
 it is the quota that is spent. No row was written, so the rejected request did
 not consume quota either.
 
+### The three boundary cases from DESIGN.md section 8
+
+Free allows 1,000 API calls. Each block starts from an emptied `usage_events`,
+and every case is a single `curl` reporting both body and status, so no key is
+sent twice and no response below is a mirrored duplicate.
+
+```
+$ docker compose exec db psql -U billing -d billing -P pager=off -c "DELETE FROM usage_events"
+DELETE 0
+
+=== consume 999 of 1000 ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: b-999" -d '{"event_type":"api_call","quantity":999}'
+{"event":{"id":"8","tenant_id":"1","event_type":"api_call","quantity":999,"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_tokens":0,"cost_micros":"0","idempotency_key":"b-999","created_at":"2026-08-29T07:14:01.853Z"},"cost_micros":0,"duplicate":false,"remaining":{"api_calls":1,"tokens":100000}}
+HTTP 200
+
+=== case 1: request 1, lands exactly at limit (expect 200) ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: b-at-limit" -d '{"event_type":"api_call","quantity":1}'
+{"event":{"id":"9","tenant_id":"1","event_type":"api_call","quantity":1,"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_tokens":0,"cost_micros":"0","idempotency_key":"b-at-limit","created_at":"2026-08-29T07:14:01.875Z"},"cost_micros":0,"duplicate":false,"remaining":{"api_calls":0,"tokens":100000}}
+HTTP 200
+
+=== case 2: one more (expect 429) ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: b-over" -d '{"event_type":"api_call","quantity":1}'
+{"error":"quota_exceeded"}
+HTTP 429
+```
+
+Case 1 lands exactly on 1,000 and is allowed: the limit is a ceiling the tenant
+may reach, not one they must stay under. `remaining.api_calls` reads 0 rather
+than a negative number, and `duplicate` is `false`, so this is a real insert and
+not a mirrored retry. Case 2 is the same request one call later and is refused
+with 429 — the subscription is active, the quota is spent.
+
+Case 3 is the all-or-nothing rule, run from an emptied table:
+
+```
+$ docker compose exec db psql -U billing -d billing -P pager=off -c "DELETE FROM usage_events"
+DELETE 2
+$ # consume 999 (key o-999, output discarded), then ask for 6 more
+
+=== at 999, request 6 (expect 429, nothing recorded) ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: o-6" -d '{"event_type":"api_call","quantity":6}'
+{"error":"quota_exceeded"}
+HTTP 429
+
+$ docker compose exec db psql -U billing -d billing -P pager=off \
+    -c "SELECT COALESCE(SUM(quantity),0) AS used FROM usage_events WHERE tenant_id = 1 AND event_type = 'api_call'"
+ used
+------
+  999
+(1 row)
+```
+
+One of the six calls would have fit under the limit. None was served: usage stays
+at 999, not 1,000. The request is refused whole rather than partially filled,
+which is the rule in DESIGN.md section 8 — serving part of a request would mean
+billing for work that was not completed.
+
+The `DELETE 0` on the first block is not a failed cleanup: the table was already
+empty when that run started. Row ids continue from earlier runs because `DELETE`
+does not reset the sequence, which is why the two blocks start at 8 and at a
+fresh pair rather than at 1.
+
 ### Auth, identity, and malformed bodies are separated from quota failures
 
 ```
@@ -232,7 +302,195 @@ instead of resolved.
 
 ## Stripe integration
 
-_(pending)_
+### Webhooks verify signatures
+
+A request with a fabricated `Stripe-Signature` header:
+
+```
+=== forged webhook (expect 400) ===
+{"error":"invalid_signature"}
+HTTP 400
+=== processed_webhooks rows (expect 0) ===
+ count
+-------
+     0
+```
+
+Verification happens in the route itself, before any database call: `constructEvent`
+recomputes the HMAC over the raw request bytes and throws unless it matches the
+`Stripe-Signature` header, so the handler that writes `processed_webhooks`,
+`subscriptions`, and `tenants` is never reached and the forged event leaves no trace.
+The route is mounted with `express.raw({ type: 'application/json' })` ahead of the
+global `express.json()` for exactly this reason — a body that has been parsed and
+re-serialised no longer hashes to the value Stripe signed, and every signature would
+fail for reasons that look nothing like the cause.
+
+### Webhooks ignore duplicate events
+
+The same event redelivered with `stripe events resend`:
+
+```
+=== before ===
+ count
+-------
+    15
+
+$ stripe events resend evt_1U9hJPA5PfF0gj0QCxdXNNOI
+(event redelivered; payload omitted)
+
+=== after (expect same count) ===
+ count
+-------
+    15
+```
+
+`processed_webhooks` has `stripe_event_id` as its primary key, and the first statement
+inside the handler's transaction inserts the incoming event id there. A redelivery
+violates that primary key, the insert raises SQLSTATE 23505, and the handler returns
+200 having applied nothing — which is the right answer to Stripe, since an error would
+only earn another retry of an event already handled. The insert comes first rather than
+last so a replay is rejected before any tenant or subscription row is touched; keeping
+it inside the same transaction as the writes is what makes a failed handler roll the
+marker back too, so Stripe's retry gets a real second attempt instead of finding a
+marker for work that never happened.
+
+### Subscription checkout works end-to-end in Stripe test mode
+### Webhooks update tenant plan / status
+
+`POST /checkout` for tenant 1 on the `pro` plan returns a Checkout session URL. Paying
+with test card `4242 4242 4242 4242` in the sandbox produced these events (from
+`stripe listen`), all answered 200:
+
+```
+--> checkout.session.completed [evt_1U9hQ9A5PfF0gj0QBnPfAblO]
+<-- [200] POST http://localhost:3000/webhooks/stripe
+--> customer.subscription.created [evt_1U9hQ9A5PfF0gj0QmeWUP3Ih]
+<-- [200] POST http://localhost:3000/webhooks/stripe
+```
+
+The tenant row after the webhooks were processed:
+
+```
+ id | plan_id | subscription_status | stripe_customer_id
+----+---------+---------------------+--------------------
+  1 | pro     | active              | cus_VA1Td5LEvdsqyK
+```
+
+The subscription row, with the billing period Stripe assigned:
+
+```
+    stripe_subscription_id    | status |  current_period_start  |   current_period_end
+------------------------------+--------+------------------------+------------------------
+ sub_1U9hQ7A5PfF0gj0Q3JtDmxzZ | active | 2026-08-29 08:15:21+00 | 2026-09-29 08:15:21+00
+```
+
+And the quota the metering layer now enforces:
+
+```
+$ curl -s -X POST localhost:3000/generate -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: pro-quota-1787991385" \
+    -d '{"event_type":"api_call","quantity":1}'
+
+{"event":{...},"cost_micros":0,"duplicate":false,
+ "remaining":{"api_calls":49999,"tokens":5000000}}
+```
+
+The tenant row on its own only proves a string was written. `49,999` proves the whole
+chain agreed: the webhook set `plan_id` to `pro`, the meter's join to `plans` read
+Pro's `api_calls_limit` of 50,000 rather than Free's 1,000, and one call inside the
+period was counted against it.
+
+The token figure is what identifies where the billing period came from. It reads
+5,000,000 — the full Pro allowance — even though 7,000 tokens were metered for this
+same tenant earlier the same day, at 07:32 and 07:33. Those events fall before
+`current_period_start` of 08:15:21, so the rollup excludes them. A calendar-month
+window would have counted them and returned 4,993,000, and the `COALESCE` fallback in
+`recordUsage` would have produced exactly that. 5,000,000 is only reachable by reading
+the period off the `subscriptions` row Stripe created, which is the claim DESIGN.md
+section 3 makes for that table.
+
+### An inactive subscription is 402, and flipping it back restores service
+
+`subscription_status` is flipped directly in the database rather than through a
+Stripe webhook, so this exercises the enforcement path without a live Stripe
+event. Each request uses a fresh key, so no response here is a mirrored retry.
+
+```
+$ docker compose exec db psql -U billing -d billing -P pager=off -c "DELETE FROM usage_events"
+DELETE 1
+$ docker compose exec db psql -U billing -d billing -P pager=off \
+    -c "UPDATE tenants SET subscription_status = 'past_due' WHERE id = 1"
+UPDATE 1
+
+=== subscription past_due: fresh key (expect 402) ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: sub-402" -d '{"event_type":"api_call","quantity":1}'
+{"error":"subscription_inactive"}
+HTTP 402
+
+$ docker compose exec db psql -U billing -d billing -P pager=off \
+    -c "UPDATE tenants SET subscription_status = 'active' WHERE id = 1"
+UPDATE 1
+
+=== restored to active: same request, fresh key (expect 200) ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: sub-200" -d '{"event_type":"api_call","quantity":1}'
+{"event":{"id":"13","tenant_id":"1","event_type":"api_call","quantity":1,"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_tokens":0,"cost_micros":"0","idempotency_key":"sub-200","created_at":"2026-08-29T07:21:09.714Z"},"cost_micros":0,"duplicate":false,"remaining":{"api_calls":999,"tokens":100000}}
+HTTP 200
+
+$ docker compose exec db psql -U billing -d billing -P pager=off \
+    -c "SELECT COUNT(*) AS rows_written FROM usage_events WHERE tenant_id = 1"
+ rows_written
+--------------
+            1
+(1 row)
+```
+
+The flip back to `active` is what makes this a proof rather than a coincidence:
+the identical request fails and then succeeds, with nothing changing but the
+subscription status. The row count is 1, so the rejected request wrote nothing —
+a 402 costs the tenant no quota.
+
+### When a tenant is both over quota and past due, 402 wins
+
+DESIGN.md section 8 says the inactive subscription is the more fundamental
+problem and takes precedence. The same request is sent twice against a tenant
+sitting at 1,000/1,000 calls; only the subscription status differs.
+
+```
+$ docker compose exec db psql -U billing -d billing -P pager=off -c "DELETE FROM usage_events"
+DELETE 1
+$ # consume the full 1,000 calls (key pri-1000, output discarded)
+
+=== at 1000/1000, subscription active (expect 429) ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: pri-429" -d '{"event_type":"api_call","quantity":1}'
+{"error":"quota_exceeded"}
+HTTP 429
+
+$ docker compose exec db psql -U billing -d billing -P pager=off \
+    -c "UPDATE tenants SET subscription_status = 'past_due' WHERE id = 1"
+UPDATE 1
+
+=== same request, still over quota, now also past_due (expect 402, not 429) ===
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
+    -H "Content-Type: application/json" -H "X-Tenant-Id: 1" \
+    -H "Idempotency-Key: pri-402" -d '{"event_type":"api_call","quantity":1}'
+{"error":"subscription_inactive"}
+HTTP 402
+
+$ docker compose exec db psql -U billing -d billing -P pager=off \
+    -c "UPDATE tenants SET subscription_status = 'active' WHERE id = 1"
+UPDATE 1
+```
+
+The quota is exhausted in both cases, so 429 would be defensible either time. The
+response changes to 402 because the subscription check runs first, which is the
+ordering DESIGN.md section 8 argues for: telling a tenant to wait for a quota
+reset is misleading when the subscription that would reset it has lapsed.
 
 ## Data model
 

@@ -2,10 +2,79 @@ require('dotenv').config();
 
 const express = require('express');
 const { recordUsage } = require('./lib/meter');
+const { createCheckoutSession, constructEvent, handleStripeEvent } = require('./lib/billing');
 
 const app = express();
 
+const port = process.env.PORT || 3000;
+
+// Mounted before express.json(): signature verification needs the unparsed body,
+// and a JSON parser upstream of this route would consume it first.
+app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const signature = req.get('stripe-signature');
+
+  if (!signature) {
+    return res.status(400).json({ error: 'missing_signature' });
+  }
+
+  let event;
+
+  try {
+    event = constructEvent(req.body, signature);
+  } catch (err) {
+    if (err.status === 500) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    return res.status(400).json({ error: 'invalid_signature' });
+  }
+
+  try {
+    const result = await handleStripeEvent(event);
+
+    return res.status(200).json({ received: true, duplicate: result.duplicate });
+  } catch (err) {
+    console.error(err);
+
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
+
 app.use(express.json());
+
+app.post('/checkout', async (req, res) => {
+  const tenantId = req.get('X-Tenant-Id');
+
+  if (!tenantId) {
+    return res.status(401).json({ error: 'missing_tenant' });
+  }
+
+  const body = req.body || {};
+  const planId = body.plan_id;
+
+  if (typeof planId !== 'string' || planId.length === 0) {
+    return res.status(400).json({ error: 'invalid_plan_id' });
+  }
+
+  try {
+    const session = await createCheckoutSession({
+      tenantId,
+      planId,
+      successUrl: body.success_url || `http://localhost:${port}/checkout/success`,
+      cancelUrl: body.cancel_url || `http://localhost:${port}/checkout/cancel`,
+    });
+
+    return res.status(200).json(session);
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message });
+    }
+
+    console.error(err);
+
+    return res.status(500).json({ error: 'stripe_error' });
+  }
+});
 
 const EVENT_TYPES = ['api_call', 'tokens'];
 const TOKEN_FIELDS = [
@@ -112,8 +181,6 @@ app.post('/generate', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
-
-const port = process.env.PORT || 3000;
 
 app.listen(port, () => {
   console.log(`listening on ${port}`);
