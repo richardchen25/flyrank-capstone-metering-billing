@@ -90,6 +90,12 @@ Reasoning tokens fold into output before multiplying, because they are priced id
 | `/checkout` | POST | Creates a Stripe checkout session for upgrading a plan. | 200, 401, 500 (Stripe unreachable) |
 | `/webhooks/stripe` | POST | Receives Stripe subscription events. | 200 (including replays, which are a no-op), 400 (bad signature) |
 
+**What `/generate` accepts.** A JSON body that is flat and snake_case throughout, with field names matching the `usage_events` columns: `event_type` (`api_call` or `tokens`), `quantity` for call-metered requests, and `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_tokens` for token-metered ones. Any omitted count defaults to 0. Tenant identity comes from the `X-Tenant-Id` header and the idempotency key from `Idempotency-Key`, so the body carries usage and nothing else. Unrecognised fields are rejected with 400 rather than ignored: a client that misspells `output_tokens`, or sends counts in a shape the server does not read, would otherwise get a cheerful 200 for an event billed at zero — a silent undercharge that looks like success from both ends.
+
+Flat is the canonical shape, for a naming reason: nesting puts camelCase counts inside a `tokens` object while `event_type` beside them stays snake_case, and the response would return `input_tokens` for the value the request called `tokens.inputTokens`. One convention across request, response, and schema is worth more than the grouping.
+
+A nested body — `{"tokens": {"inputTokens": 1000, "outputTokens": 2500}}` — is also accepted, because clients were already sending it and rejecting them bought nothing a translation could not. The two shapes are exclusive rather than merged: sending the same event both ways is a 400 (`conflicting_token_fields`) rather than a silent precedence rule, because two sources for one number is exactly the ambiguity that produces a wrong bill. Unrecognised keys inside `tokens` are rejected the same as unrecognised keys outside it, so `tokens.inputToken` is a 400 and not a zero. Both shapes normalise to the same stored row and the same response, which is always flat.
+
 **What `/generate` returns on 200.** A JSON body containing the usage event id, the four token counts as recorded, the computed `cost_micros` for that request, and the tenant's remaining quota for the current period. This matters for section 7: every field in the response is derived from the stored usage event, which is what makes mirroring a duplicate possible without storing the response separately.
 
 The webhook endpoint returns 200 on a replayed event rather than an error, because from Stripe's side a successful delivery is a successful delivery. Returning an error would make Stripe retry an event I have already handled.
@@ -104,7 +110,11 @@ On a duplicate, I return the original response rather than processing again or e
 
 I do not store the response body. I reconstruct it from the existing `usage_events` row, which works because every field in a `/generate` response is derived from that row: the event id, the four token counts, `cost_micros`, and the remaining quota computed from the tenant's usage for the period. Storing a `response_body` column would be the alternative, and it would be the right call if responses ever contained something not recoverable from the event. They do not, so a stored copy would be a second source of truth I would have to keep in sync with the first.
 
-The enforcement lives in the database, not in my code. There is a unique index on `(tenant_id, idempotency_key)`, so a duplicate insert fails on the constraint. I do not check for existence first and then insert, because two concurrent requests could both pass the check before either inserts. The constraint is the guarantee; the code just handles the rejection.
+The enforcement lives in the database, not in my code. There is a unique index on `(tenant_id, idempotency_key)`, so a duplicate insert fails on the constraint with SQLSTATE 23505, and `recordUsage` catches that code specifically — not every error, which would hide real bugs behind a mirrored response.
+
+There are two paths to a mirrored response and they cover different cases. `recordUsage` looks the key up before inserting, which handles the ordinary sequential retry cleanly. That lookup is an optimisation, not the guarantee: two concurrent requests can both look, both find nothing, and both attempt the insert. The constraint is what catches the second one, and the 23505 handler re-selects the committed row and returns it as if the insert had succeeded. Losing that race is indistinguishable from winning it, from the client's side.
+
+The lookup runs before the subscription and quota checks, not after. A retry is a replay of something that already happened and was already billed, so nothing about the tenant's current state should change the answer. Checking quota first would mean a tenant sitting at their limit gets a 429 when they retry a request that already succeeded, which contradicts the promise above — the retry would look like a failure for work already done and paid for. The same reasoning covers a lapsed subscription: a duplicate mirrors the original 200 rather than returning 402, because the event predates the lapse.
 
 ## 8. Boundary rule
 
@@ -119,6 +129,8 @@ Three cases against a 1,000 call limit:
 **429 versus 402.** 429 means the subscription is active but the quota for this period is spent — waiting for the period to reset, or upgrading, fixes it. 402 means the subscription itself is not active: Stripe has the tenant as `past_due` or `canceled`, so there is no valid plan to draw a quota from.
 
 **When both apply** — the tenant is over quota *and* their subscription has lapsed — **402 wins.** The inactive subscription is the more fundamental problem and the more actionable message. Telling someone to wait for their quota to reset would be misleading when the subscription that would renew it no longer exists.
+
+**The check-then-insert race.** Reading current usage and inserting the event are two statements, so two concurrent requests could both pass the quota check before either inserts and together push a tenant over the limit. I take the transactional fix rather than documenting it as a known limitation: `recordUsage` opens a transaction and takes `SELECT ... FOR UPDATE` on the tenant row before reading usage, so concurrent requests for the same tenant serialize behind that lock and the second one reads the first one's committed event. The lock is scoped with `FOR UPDATE OF t` — it names the tenants row specifically, both because that is the row worth locking and because Postgres refuses to lock the nullable side of the `LEFT JOIN` to subscriptions. Being per tenant, it does not serialize unrelated tenants against each other. The cost is holding a row lock for the length of the request, which is the right trade for a limit that decides whether a tenant is billed.
 
 ## 9. Non-goal
 
