@@ -1,15 +1,14 @@
 require('dotenv').config();
 
 const express = require('express');
-const { recordUsage } = require('./lib/meter');
+const { recordUsage, getUsage } = require('./lib/meter');
 const { createCheckoutSession, constructEvent, handleStripeEvent } = require('./lib/billing');
 
 const app = express();
 
 const port = process.env.PORT || 3000;
 
-// Mounted before express.json(): signature verification needs the unparsed body,
-// and a JSON parser upstream of this route would consume it first.
+// Must stay above express.json(): signature verification needs the unparsed body.
 app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const signature = req.get('stripe-signature');
 
@@ -41,6 +40,40 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
 });
 
 app.use(express.json());
+
+app.get('/usage', async (req, res) => {
+  const tenantId = req.get('X-Tenant-Id');
+
+  if (!tenantId) {
+    return res.status(401).json({ error: 'missing_tenant' });
+  }
+
+  try {
+    const usage = await getUsage({ tenantId });
+
+    return res.status(200).json({
+      tenant_id: usage.tenantId,
+      plan: usage.plan,
+      subscription_status: usage.subscriptionStatus,
+      period: {
+        start: usage.period.start,
+        end: usage.period.end,
+        source: usage.period.source,
+      },
+      api_calls: usage.apiCalls,
+      tokens: usage.tokens,
+      cost_micros: usage.costMicros,
+    });
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message });
+    }
+
+    console.error(err);
+
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
 
 app.post('/checkout', async (req, res) => {
   const tenantId = req.get('X-Tenant-Id');

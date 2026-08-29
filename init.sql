@@ -1,5 +1,3 @@
--- Schema for the metering and billing service. See DESIGN.md section 3.
-
 CREATE TABLE IF NOT EXISTS plans (
   id              TEXT        PRIMARY KEY,
   name            TEXT        NOT NULL,
@@ -59,18 +57,14 @@ CREATE TABLE IF NOT EXISTS processed_webhooks (
   processed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- price_cents for Pro is a placeholder; reconcile with the Stripe Price used by
--- POST /checkout.
 INSERT INTO plans (id, name, api_calls_limit, tokens_limit, price_cents) VALUES
   ('free', 'Free', 1000,    100000,  0),
   ('pro',  'Pro',  50000, 5000000, 2000)
 ON CONFLICT (id) DO NOTHING;
 
--- A tenant to meter against before any Stripe customer exists. The id is fixed
--- so local curl commands can hardcode it; setval then stops BIGSERIAL from
--- handing the same id to the next real tenant.
 INSERT INTO tenants (id, name, plan_id, subscription_status) VALUES
   (1, 'Test Tenant', 'free', 'active')
 ON CONFLICT (id) DO NOTHING;
 
+-- An explicit id does not advance the sequence; without this the next insert reuses it.
 SELECT setval(pg_get_serial_sequence('tenants', 'id'), (SELECT MAX(id) FROM tenants));

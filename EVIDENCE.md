@@ -1,14 +1,14 @@
 # EVIDENCE
 
-One proof per requirement checkbox from DESIGN.md / the capstone brief.
+One proof per requirement checkbox from DESIGN.md and the capstone brief.
 
 ## Cost calculation
 
 ### AI token pricing handles cached input, reasoning tokens, and output correctly
 ### Pricing constants pinned in config, with proof of correct totals
 
-Constants live in `lib/pricing.js`: input $0.10/M, cached input $0.025/M (25% of
-input), output $0.40/M, reasoning priced identically to output. The command below
+My constants live in `lib/pricing.js`: input $0.10/M, cached input $0.025/M (25% of
+input), output $0.40/M, and reasoning priced identically to output. The command below
 prints the constants straight off the module, so the totals underneath are proven
 against the same values the service prices with.
 
@@ -38,25 +38,24 @@ REASONING_RATE: 0.4
 empty (expect 0): 0
 ```
 
-`CACHED_INPUT_RATE` prints as `0.025` although it is written as
-`INPUT_RATE * 0.25` — the ratio is what is pinned, and it evaluates to the rate
-in the table.
+`CACHED_INPUT_RATE` prints as `0.025` even though I wrote it as `INPUT_RATE * 0.25`,
+since the ratio is what I pinned and it evaluates to the rate in the table.
 
-The reasoning case is the important one: 1,000 output + 1,000 reasoning costs 800
-micros, identical to the 2,000 output tokens printed on the next line. Reasoning
-folds into output before multiplying rather than being ignored or priced on a
+The reasoning case is the important one. 1,000 output plus 1,000 reasoning costs 800
+micros, which is identical to the 2,000 output tokens printed on the next line, so
+reasoning folds into output before multiplying rather than being ignored or priced on a
 separate line.
 
-The cached case is the other one worth reading: 1M cached input costs 25,000
-micros, not the 100,000 that 1M plain input costs. Summing the categories before
+The cached case is the other one worth reading. 1M cached input costs 25,000 micros
+rather than the 100,000 that 1M plain input costs, so summing the categories before
 pricing would charge the input rate on cached tokens and overcharge by 4x.
 
 ## Metering
 
 ### A duplicate request returns the original response rather than billing twice
 
-Server running against the database in `.env` (port 5433), tenant 1 on the Free
-plan. The same `Idempotency-Key` is sent twice with the same body.
+The server is running against the database in `.env` on port 5433, with tenant 1 on the
+Free plan. I sent the same `Idempotency-Key` twice with the same body.
 
 ```
 $ curl -s -X POST http://localhost:3000/generate \
@@ -69,21 +68,21 @@ $ # identical request replayed
 {"event":{"id":"8","tenant_id":"1","event_type":"tokens","quantity":0,"input_tokens":1000,"cached_input_tokens":0,"output_tokens":2500,"reasoning_tokens":0,"cost_micros":"1100","idempotency_key":"rem-1","created_at":"2026-08-29T06:55:24.346Z"},"cost_micros":1100,"duplicate":true,"remaining":{"api_calls":999,"tokens":88000}} [200]
 ```
 
-Event id stays `8` and `created_at` stays at the first request's timestamp, so no
-second row was written; only `duplicate` changes. `remaining` is identical across
-the two, which is the point — the replay reports the quota state the original
-request left behind, not a second deduction.
+The event id stays `8` and `created_at` stays at the first request's timestamp, so no
+second row was written and only `duplicate` changes. `remaining` is identical across the
+two, which is the point, because the replay reports the quota state the original request
+left behind rather than a second deduction.
 
-The cost is also the cross-check on section 5's rule: 1,000 input at $0.10/M is
-100 micros, 2,500 output at $0.40/M is 1,000 micros, total 1,100.
+The cost is also the cross-check on section 5's rule: 1,000 input at $0.10/M is 100
+micros, 2,500 output at $0.40/M is 1,000 micros, and the total is 1,100.
 
-An earlier run proved the same key beats a changed body — replaying a key with
-`output_tokens` raised to 999,999 returned the original 2,500-token event
-unchanged, not a second charge.
+In an earlier run I proved the same key beats a changed body, since replaying a key with
+`output_tokens` raised to 999,999 returned the original 2,500-token event unchanged
+rather than a second charge.
 
 ### The database holds one row, not two, after a retry
 
-Run from an emptied `usage_events` table, so the row ids and the quota figures
+I ran this from an emptied `usage_events` table, so the row ids and the quota figures
 are unambiguous rather than carried over from earlier runs.
 
 ```
@@ -108,22 +107,21 @@ $ docker compose exec db psql -U billing -d billing -P pager=off \
 (1 row)
 ```
 
-Four things line up. The event id is `14` in both responses and `created_at` is
-identical, so the second request returned the first request's row rather than
-writing its own. `duplicate` flips from `false` to `true`. The row count is 1.
-And `remaining.tokens` is 96,500 in both — 100,000 minus the 3,500 tokens of a
-single event, not the 7,000 two events would have consumed, which is the
-quota-side confirmation that nothing was billed twice.
+Four things line up here. The event id is `14` in both responses and `created_at` is
+identical, so the second request returned the first request's row rather than writing its
+own. `duplicate` flips from `false` to `true`. The row count is 1. And `remaining.tokens`
+is 96,500 in both, which is 100,000 minus the 3,500 tokens of a single event rather than
+the 7,000 two events would have consumed, so the quota side confirms nothing was billed
+twice.
 
-`DELETE 0` reports zero rows because the table had already been cleared before
-this run; the end state is a table holding exactly one row, which is what the
-count asserts.
+`DELETE 0` reports zero rows because the table had already been cleared before this run.
+The end state is a table holding exactly one row, which is what the count asserts.
 
 The count is only meaningful alongside the cost. An earlier version of this probe
-returned `count = 1` with `SUM(cost_micros) = 0`: a malformed body had been
-metered as zero on a previous run, and both requests in that probe had failed
-outright without writing anything. One row is not proof on its own — one row
-billed 1,100 micros is.
+returned `count = 1` with `SUM(cost_micros) = 0`, because a malformed body had been
+metered as zero on a previous run and both requests in that probe had failed outright
+without writing anything. One row is not proof on its own, but one row billed 1,100
+micros is.
 
 ### Remaining quota is reported against the plan limit
 
@@ -135,17 +133,17 @@ $ curl -s -X POST http://localhost:3000/generate \
 {"event":{"id":"9",...,"event_type":"api_call","quantity":5,...,"cost_micros":"0","idempotency_key":"rem-call",...},"cost_micros":0,"duplicate":false,"remaining":{"api_calls":994,"tokens":88000}} [200]
 ```
 
-Free allows 1,000 calls and 100,000 tokens. One call had been recorded before
-this request, so five more leaves 994; the token figure is untouched at 88,000
-because an `api_call` event carries no tokens. The two dimensions are metered
+Free allows 1,000 calls and 100,000 tokens. One call had been recorded before this
+request, so five more leaves 994. The token figure is untouched at 88,000 because an
+`api_call` event carries no tokens, which shows the two dimensions are metered
 independently.
 
 ## Quotas
 
 ### A request that would exceed the plan limit is rejected with 429
 
-Tenant 1 is on Free (100,000 tokens/month) with 8,500 tokens already recorded in
-the period. The request below asks for 100,000 more, which would land at 108,500.
+Tenant 1 is on Free with 100,000 tokens per month, and already has 8,500 tokens recorded
+in the period. The request below asks for 100,000 more, which would land at 108,500.
 
 ```
 $ curl -s -X POST http://localhost:3000/generate \
@@ -155,16 +153,16 @@ $ curl -s -X POST http://localhost:3000/generate \
 {"error":"quota_exceeded"} [429]
 ```
 
-Rejected whole rather than partially fulfilled, per the boundary rule in
-DESIGN.md section 8. 429 rather than 402 because the subscription is active and
-it is the quota that is spent. No row was written, so the rejected request did
-not consume quota either.
+It is rejected whole rather than partially fulfilled, following the boundary rule in
+DESIGN.md section 8. It returns 429 rather than 402 because the subscription is active
+and it is the quota that is spent. No row was written, so the rejected request did not
+consume quota either.
 
 ### The three boundary cases from DESIGN.md section 8
 
-Free allows 1,000 API calls. Each block starts from an emptied `usage_events`,
-and every case is a single `curl` reporting both body and status, so no key is
-sent twice and no response below is a mirrored duplicate.
+Free allows 1,000 API calls. Each block starts from an emptied `usage_events`, and every
+case is a single `curl` reporting both body and status, so no key is sent twice and no
+response below is a mirrored duplicate.
 
 ```
 $ docker compose exec db psql -U billing -d billing -P pager=off -c "DELETE FROM usage_events"
@@ -192,11 +190,11 @@ $ curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost:3000/generate \
 HTTP 429
 ```
 
-Case 1 lands exactly on 1,000 and is allowed: the limit is a ceiling the tenant
-may reach, not one they must stay under. `remaining.api_calls` reads 0 rather
-than a negative number, and `duplicate` is `false`, so this is a real insert and
-not a mirrored retry. Case 2 is the same request one call later and is refused
-with 429 — the subscription is active, the quota is spent.
+Case 1 lands exactly on 1,000 and is allowed, because the limit is a ceiling the tenant
+may reach rather than one they have to stay under. `remaining.api_calls` reads 0 rather
+than a negative number, and `duplicate` is `false`, so this is a real insert rather than
+a mirrored retry. Case 2 is the same request one call later and is refused with 429,
+since the subscription is active and the quota is spent.
 
 Case 3 is the all-or-nothing rule, run from an emptied table:
 
@@ -220,15 +218,15 @@ $ docker compose exec db psql -U billing -d billing -P pager=off \
 (1 row)
 ```
 
-One of the six calls would have fit under the limit. None was served: usage stays
-at 999, not 1,000. The request is refused whole rather than partially filled,
-which is the rule in DESIGN.md section 8 — serving part of a request would mean
-billing for work that was not completed.
+One of the six calls would have fit under the limit, but none was served, since usage
+stays at 999 rather than 1,000. The request is refused whole rather than partially
+filled, which is the rule in DESIGN.md section 8, because serving part of a request
+would mean billing for work that was not completed.
 
-The `DELETE 0` on the first block is not a failed cleanup: the table was already
-empty when that run started. Row ids continue from earlier runs because `DELETE`
-does not reset the sequence, which is why the two blocks start at 8 and at a
-fresh pair rather than at 1.
+The `DELETE 0` on the first block is not a failed cleanup, since the table was already
+empty when that run started. Row ids continue from earlier runs because `DELETE` does not
+reset the sequence, which is why the two blocks start at 8 and at a fresh pair rather
+than at 1.
 
 ### Auth, identity, and malformed bodies are separated from quota failures
 
@@ -255,14 +253,14 @@ $ # {"event_type":"tokens","output_token":2500}  — singular typo
 {"error":"unknown_field","field":"output_token"} [400]
 ```
 
-Each failure names the field that caused it, and none of them returns a stack
-trace. The 400 on a missing `Idempotency-Key` is the policy from DESIGN.md
-section 7 — the header is mandatory rather than server-generated.
+Each failure names the field that caused it, and none of them returns a stack trace. The
+400 on a missing `Idempotency-Key` is the policy from DESIGN.md section 7, since I made
+the header mandatory rather than server-generated.
 
 ### Both request shapes meter identically, and mixing them is rejected
 
-Flat is canonical; the nested `tokens` object is accepted as an alias. The same
-usage sent either way produces the same stored row and the same cost.
+Flat is canonical, and I accept the nested `tokens` object as an alias. The same usage
+sent either way produces the same stored row and the same cost.
 
 ```
 $ # nested, sent twice with one key
@@ -279,8 +277,8 @@ $ # flat, same numbers, different key
 {"event":{"id":"13",...,"input_tokens":1000,"output_tokens":2500,"cost_micros":"1100",...},"cost_micros":1100,"duplicate":false,...}
 ```
 
-The stored row is identical whichever shape arrives, and the response is always
-flat. The failure modes around the alias:
+The stored row is identical whichever shape arrives, and the response is always flat.
+These are the failure modes around the alias:
 
 ```
 $ # {"event_type":"tokens","tokens":{"inputToken":1000}}  — typo inside the object
@@ -296,9 +294,9 @@ $ # {"event_type":"tokens","tokens":{"inputTokens":-5}}
 {"error":"invalid_token_count","field":"tokens.inputTokens"} [400]
 ```
 
-Mixing the shapes is a 400 rather than a precedence rule. Two sources for one
-number is how a wrong bill gets written quietly, so the request is refused
-instead of resolved.
+I made mixing the shapes a 400 rather than a precedence rule, because two sources for
+one number is how a wrong bill gets written quietly, so I refuse the request instead of
+resolving it.
 
 ## Stripe integration
 
@@ -316,12 +314,12 @@ HTTP 400
      0
 ```
 
-Verification happens in the route itself, before any database call: `constructEvent`
+Verification happens in the route itself, before any database call. `constructEvent`
 recomputes the HMAC over the raw request bytes and throws unless it matches the
 `Stripe-Signature` header, so the handler that writes `processed_webhooks`,
 `subscriptions`, and `tenants` is never reached and the forged event leaves no trace.
-The route is mounted with `express.raw({ type: 'application/json' })` ahead of the
-global `express.json()` for exactly this reason — a body that has been parsed and
+This is exactly why I mount the route with `express.raw({ type: 'application/json' })`
+ahead of the global `express.json()`, because a body that has been parsed and
 re-serialised no longer hashes to the value Stripe signed, and every signature would
 fail for reasons that look nothing like the cause.
 
@@ -346,20 +344,20 @@ $ stripe events resend evt_1U9hJPA5PfF0gj0QCxdXNNOI
 
 `processed_webhooks` has `stripe_event_id` as its primary key, and the first statement
 inside the handler's transaction inserts the incoming event id there. A redelivery
-violates that primary key, the insert raises SQLSTATE 23505, and the handler returns
-200 having applied nothing — which is the right answer to Stripe, since an error would
-only earn another retry of an event already handled. The insert comes first rather than
-last so a replay is rejected before any tenant or subscription row is touched; keeping
-it inside the same transaction as the writes is what makes a failed handler roll the
-marker back too, so Stripe's retry gets a real second attempt instead of finding a
-marker for work that never happened.
+violates that primary key, the insert raises SQLSTATE 23505, and the handler returns 200
+having applied nothing, which is the right answer to Stripe since an error would only
+earn another retry of an event I already handled. I put the insert first rather than last
+so a replay is rejected before any tenant or subscription row is touched, and I keep it
+inside the same transaction as the writes so that a failed handler rolls the marker back
+too, which means Stripe's retry gets a real second attempt instead of finding a marker
+for work that never happened.
 
 ### Subscription checkout works end-to-end in Stripe test mode
 ### Webhooks update tenant plan / status
 
 `POST /checkout` for tenant 1 on the `pro` plan returns a Checkout session URL. Paying
-with test card `4242 4242 4242 4242` in the sandbox produced these events (from
-`stripe listen`), all answered 200:
+with test card `4242 4242 4242 4242` in the sandbox produced these events from `stripe
+listen`, all answered 200:
 
 ```
 --> checkout.session.completed [evt_1U9hQ9A5PfF0gj0QBnPfAblO]
@@ -396,24 +394,24 @@ $ curl -s -X POST localhost:3000/generate -H "X-Tenant-Id: 1" \
 ```
 
 The tenant row on its own only proves a string was written. `49,999` proves the whole
-chain agreed: the webhook set `plan_id` to `pro`, the meter's join to `plans` read
-Pro's `api_calls_limit` of 50,000 rather than Free's 1,000, and one call inside the
+chain agreed, because the webhook set `plan_id` to `pro`, the meter's join to `plans`
+read Pro's `api_calls_limit` of 50,000 rather than Free's 1,000, and one call inside the
 period was counted against it.
 
 The token figure is what identifies where the billing period came from. It reads
-5,000,000 — the full Pro allowance — even though 7,000 tokens were metered for this
-same tenant earlier the same day, at 07:32 and 07:33. Those events fall before
-`current_period_start` of 08:15:21, so the rollup excludes them. A calendar-month
-window would have counted them and returned 4,993,000, and the `COALESCE` fallback in
+5,000,000, which is the full Pro allowance, even though 7,000 tokens were metered for
+this same tenant earlier the same day at 07:32 and 07:33. Those events fall before
+`current_period_start` of 08:15:21, so the rollup excludes them. A calendar-month window
+would have counted them and returned 4,993,000, and the `COALESCE` fallback in
 `recordUsage` would have produced exactly that. 5,000,000 is only reachable by reading
-the period off the `subscriptions` row Stripe created, which is the claim DESIGN.md
-section 3 makes for that table.
+the period off the `subscriptions` row Stripe created, which is the claim I make for
+that table in DESIGN.md section 3.
 
 ### An inactive subscription is 402, and flipping it back restores service
 
-`subscription_status` is flipped directly in the database rather than through a
-Stripe webhook, so this exercises the enforcement path without a live Stripe
-event. Each request uses a fresh key, so no response here is a mirrored retry.
+I flipped `subscription_status` directly in the database rather than through a Stripe
+webhook, so this exercises the enforcement path without a live Stripe event. Each
+request uses a fresh key, so no response here is a mirrored retry.
 
 ```
 $ docker compose exec db psql -U billing -d billing -P pager=off -c "DELETE FROM usage_events"
@@ -448,16 +446,16 @@ $ docker compose exec db psql -U billing -d billing -P pager=off \
 (1 row)
 ```
 
-The flip back to `active` is what makes this a proof rather than a coincidence:
-the identical request fails and then succeeds, with nothing changing but the
-subscription status. The row count is 1, so the rejected request wrote nothing —
-a 402 costs the tenant no quota.
+The flip back to `active` is what makes this a proof rather than a coincidence, since the
+identical request fails and then succeeds with nothing changing but the subscription
+status. The row count is 1, so the rejected request wrote nothing, meaning a 402 costs
+the tenant no quota.
 
 ### When a tenant is both over quota and past due, 402 wins
 
-DESIGN.md section 8 says the inactive subscription is the more fundamental
-problem and takes precedence. The same request is sent twice against a tenant
-sitting at 1,000/1,000 calls; only the subscription status differs.
+DESIGN.md section 8 says the inactive subscription is the more fundamental problem and
+takes precedence. I sent the same request twice against a tenant sitting at 1,000/1,000
+calls, changing only the subscription status.
 
 ```
 $ docker compose exec db psql -U billing -d billing -P pager=off -c "DELETE FROM usage_events"
@@ -488,16 +486,68 @@ UPDATE 1
 ```
 
 The quota is exhausted in both cases, so 429 would be defensible either time. The
-response changes to 402 because the subscription check runs first, which is the
-ordering DESIGN.md section 8 argues for: telling a tenant to wait for a quota
-reset is misleading when the subscription that would reset it has lapsed.
+response changes to 402 because the subscription check runs first, which is the ordering
+I argue for in DESIGN.md section 8, since telling a tenant to wait for a quota reset is
+misleading when the subscription that would reset it has lapsed.
 
 ## Data model
 
+### Monthly usage rolls up into a cost figure per tenant
+### Database includes tenants, plans, subscriptions, and usage events
+
+`GET /usage` for tenant 1, after the Pro upgrade and a few metered requests:
+
+```
+$ curl -s http://localhost:3000/usage -H "X-Tenant-Id: 1"
+
+{
+  "tenant_id": "1",
+  "plan": { "id": "pro", "name": "Pro" },
+  "subscription_status": "active",
+  "period": {
+    "start": "2026-08-29T08:15:21.000Z",
+    "end": "2026-09-29T08:15:21.000Z",
+    "source": "stripe_subscription"
+  },
+  "api_calls": { "used": 2, "limit": 50000, "remaining": 49998 },
+  "tokens": { "used": 3500, "limit": 5000000, "remaining": 4996500 },
+  "cost_micros": 1100
+}
+
+HTTP 200
+```
+
+`period.source` reports where the window came from. `stripe_subscription` means the
+bounds were read off the `subscriptions` row Stripe created, and
+`calendar_month_fallback` would mean no covering subscription existed and the code fell
+back to the calendar month. The distinction matters because every number beside it is
+relative to that window, since a tenant who subscribed on the 29th has a quota period
+running the 29th to the 29th, and measuring their usage against August 1st to September
+1st would give a different answer to the same question. Reporting the source turns that
+from something a reviewer has to infer out of the timestamps into something the response
+states.
+
+Four tables had to agree for this one response. `tenants` supplied `plan_id` and
+`subscription_status`, `plans` supplied the name and the two limits so that `50000` is
+Pro's row rather than a constant in my code, `subscriptions` supplied the period bounds
+that scope the rollup, and `usage_events` supplied the rows summed inside them. The fifth
+table, `processed_webhooks`, is why the subscription row exists exactly once, because
+Stripe delivered `customer.subscription.created` and a redelivery of it would not have
+written a second row or shifted this period.
+
+`cost_micros: 1100` traces to the constants in `lib/pricing.js`. The only token-metered
+event in this period carried 1,000 input and 2,500 output tokens, so 1,000 input at $0.10
+per million is 100 micros, 2,500 output at $0.40 per million is 1,000 micros, and the
+categories are priced separately before being added. The two `api_call` events contribute
+nothing, because calls are metered against the quota but carry no per-call rate. The
+figure is a `SUM` over `usage_events.cost_micros`, which each event stored at write time
+rather than a recomputation at read time, so changing a rate tomorrow leaves what this
+period already cost untouched.
+
 ### The idempotency guarantee is a database constraint, not application code
 
-`init.sql` has been applied to the running database. Indexes on `usage_events`,
-read back from `pg_indexes`:
+`init.sql` has been applied to the running database. These are the indexes on
+`usage_events`, read back from `pg_indexes`:
 
 ```
 $ node -e "
@@ -512,6 +562,6 @@ CREATE INDEX usage_events_tenant_id_created_at_idx ON public.usage_events USING 
 CREATE UNIQUE INDEX usage_events_tenant_idempotency_key ON public.usage_events USING btree (tenant_id, idempotency_key)
 ```
 
-The unique index is on the pair `(tenant_id, idempotency_key)`, not on the key
-alone, so one tenant's key cannot collide with another tenant's. The second
-index covers the rollup query, which always filters on tenant and period.
+The unique index is on the pair `(tenant_id, idempotency_key)` rather than on the key
+alone, so one tenant's key cannot collide with another tenant's. The second index covers
+the rollup query, which always filters on tenant and period.

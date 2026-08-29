@@ -1,0 +1,78 @@
+# NOTE: the exact schema was not available when this was written — verify the key
+# names against the capstone brief before submitting.
+
+name: flyrank-capstone-metering-billing
+description: Usage metering and billing engine with per-tenant quotas and Stripe subscriptions.
+
+base_url: http://localhost:3000
+
+run: docker compose up -d && npm install && npm start
+seed: docker compose exec -T db psql -U billing -d billing -f /docker-entrypoint-initdb.d/init.sql
+
+env:
+  - DATABASE_URL
+  - PORT
+  - STRIPE_SECRET_KEY
+  - STRIPE_WEBHOOK_SECRET
+
+auth:
+  type: header
+  header: X-Tenant-Id
+  seeded_tenant: "1"
+
+endpoints:
+  - path: /generate
+    method: POST
+    description: Billable endpoint. Records a usage event and returns cost and remaining quota.
+    headers:
+      X-Tenant-Id: required
+      Idempotency-Key: required
+    body:
+      event_type: api_call | tokens
+      quantity: integer, for api_call events
+      input_tokens: integer
+      cached_input_tokens: integer
+      output_tokens: integer
+      reasoning_tokens: integer
+    status_codes: [200, 400, 401, 402, 404, 429]
+
+  - path: /usage
+    method: GET
+    description: Usage, limits, and cost for the current billing period.
+    headers:
+      X-Tenant-Id: required
+    status_codes: [200, 401, 404]
+
+  - path: /checkout
+    method: POST
+    description: Creates a Stripe Checkout session for a plan upgrade.
+    headers:
+      X-Tenant-Id: required
+    body:
+      plan_id: free | pro
+    status_codes: [200, 400, 401, 404, 500]
+
+  - path: /webhooks/stripe
+    method: POST
+    description: Receives Stripe subscription events. Replays are a no-op.
+    headers:
+      Stripe-Signature: required
+    status_codes: [200, 400, 500]
+
+plans:
+  - id: free
+    api_calls_limit: 1000
+    tokens_limit: 100000
+    price_cents: 0
+  - id: pro
+    api_calls_limit: 50000
+    tokens_limit: 5000000
+    price_cents: 2000
+
+pricing:
+  unit: micro_dollars
+  rates_per_million_tokens:
+    input: 0.10
+    cached_input: 0.025
+    output: 0.40
+    reasoning: 0.40
